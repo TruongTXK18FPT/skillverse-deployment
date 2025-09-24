@@ -1,0 +1,117 @@
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:17-alpine
+    container_name: skillverse-db
+    environment:
+      POSTGRES_DB: ${DOCKER_DB_NAME:-skillverse_db}
+      POSTGRES_USER: ${DOCKER_DB_USER:-skillverse_user}
+      POSTGRES_PASSWORD: ${DOCKER_DB_PASSWORD:-secret_password}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - skillverse-network
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skillverse_user -d skillverse_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: skillverse-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-secret_password}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - skillverse-network
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Spring Boot Backend
+  app:
+    build:
+      context: ./SkillVerse_BackEnd
+      dockerfile: Dockerfile
+    container_name: skillverse-backend
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://${DOCKER_DB_HOST:-db}:${DB_PORT:-5432}/${DOCKER_DB_NAME:-skillverse_db}
+      - SPRING_DATASOURCE_USERNAME=${DOCKER_DB_USER:-skillverse_user}
+      - SPRING_DATASOURCE_PASSWORD=${DOCKER_DB_PASSWORD:-secret_password}
+      - SPRING_JPA_HIBERNATE_DDL_AUTO=update
+      - SPRING_JPA_SHOW_SQL=false
+      - SPRING_REDIS_HOST=${REDIS_HOST:-redis}
+      - SPRING_REDIS_PORT=${REDIS_PORT:-6379}
+      - SPRING_REDIS_PASSWORD=${REDIS_PASSWORD:-secret_password}
+      - SERVER_PORT=8080
+      - LOGGING_LEVEL_COM_EXE_SKILLVERSE_BACKEND=INFO
+      - JWT_SECRET=${JWT_SECRET}
+      - EMAIL_FROM=${EMAIL_FROM}
+      - EMAIL_FROM_NAME=${EMAIL_FROM_NAME}
+      - SPRING_MAIL_HOST=${SMTP_HOST}
+      - SPRING_MAIL_PORT=${SMTP_PORT}
+      - SPRING_MAIL_USERNAME=${SMTP_USERNAME}
+      - SPRING_MAIL_PASSWORD=${SMTP_PASSWORD}
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - skillverse-network
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # React Frontend with Nginx
+  frontend:
+    build:
+      context: ./skillverse-prototype
+      dockerfile: Dockerfile
+    container_name: skillverse-frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - skillverse-network
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  skillverse-network:
+    driver: bridge
+    name: skillverse-network
+
+volumes:
+  postgres_data:
+    driver: local
+    name: skillverse-postgres-data
+  redis_data:
+    driver: local
+    name: skillverse-redis-data

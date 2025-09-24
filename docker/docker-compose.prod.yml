@@ -1,0 +1,208 @@
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:17-alpine
+    container_name: skillverse-db
+    environment:
+      POSTGRES_DB: skillverse_db
+      POSTGRES_USER: skillverse_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secret_password}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    ports:
+      - "127.0.0.1:5432:5432"  # Bind to localhost only
+    networks:
+      - skillverse-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skillverse_user -d skillverse_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: skillverse-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-secret_password} --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"  # Bind to localhost only
+    networks:
+      - skillverse-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+        reservations:
+          memory: 128M
+          cpus: '0.1'
+
+  # Spring Boot Backend
+  app:
+    build:
+      context: ./SkillVerse_BackEnd
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    image: skillverse-backend:${VERSION:-latest}
+    container_name: skillverse-backend
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://db:5432/skillverse_db
+      - SPRING_DATASOURCE_USERNAME=skillverse_user
+      - SPRING_DATASOURCE_PASSWORD=${DB_PASSWORD:-secret_password}
+      - SPRING_JPA_HIBERNATE_DDL_AUTO=update
+      - SPRING_JPA_SHOW_SQL=false
+      - SPRING_REDIS_HOST=redis
+      - SPRING_REDIS_PORT=6379
+      - SPRING_REDIS_PASSWORD=${REDIS_PASSWORD:-secret_password}
+      - SERVER_PORT=8080
+      - LOGGING_LEVEL_COM_EXE_SKILLVERSE_BACKEND=INFO
+      - JAVA_OPTS=-Xmx512m -Xms256m -XX:+UseG1GC -XX:MaxGCPauseMillis=200
+    ports:
+      - "127.0.0.1:8080:8080"  # Bind to localhost only
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - skillverse-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+
+  # React Frontend with Nginx
+  frontend:
+    build:
+      context: ./skillverse-prototype
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    image: skillverse-frontend:${VERSION:-latest}
+    container_name: skillverse-frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - skillverse-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+          cpus: '0.25'
+    volumes:
+      # Mount SSL certificates if available
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/certbot:/var/www/certbot:ro
+
+  # Optional: Monitoring with Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: skillverse-prometheus
+    profiles: ["monitoring"]
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - skillverse-network
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+
+  # Optional: Log aggregation with Loki
+  loki:
+    image: grafana/loki:latest
+    container_name: skillverse-loki
+    profiles: ["monitoring"]
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./monitoring/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    networks:
+      - skillverse-network
+    restart: unless-stopped
+
+networks:
+  skillverse-network:
+    driver: bridge
+    name: skillverse-network
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  postgres_data:
+    driver: local
+    name: skillverse-postgres-data
+  redis_data:
+    driver: local
+    name: skillverse-redis-data
+  prometheus_data:
+    driver: local
+    name: skillverse-prometheus-data
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/skillverse/monitoring/prometheus
+  loki_data:
+    driver: local
+    name: skillverse-loki-data
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/skillverse/monitoring/loki
