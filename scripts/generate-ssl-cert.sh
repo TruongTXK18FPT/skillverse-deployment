@@ -6,7 +6,7 @@
 set -e
 
 DOMAIN_NAME="skillverse.vn"
-EMAIL="admin@skillverse.vn"  # Change this to your email
+EMAIL="tranxuantin1234@gmail.com"  # Change this to your email
 
 # Colors
 RED='\033[0;31m'
