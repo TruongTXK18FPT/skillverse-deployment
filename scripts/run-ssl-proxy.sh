@@ -10,7 +10,7 @@ echo "🔧 Setting up SSL Proxy for SkillVerse..."
 # Configuration
 CONTAINER_NAME="skillverse-ssl-proxy"
 NETWORK_NAME="skillverse-network"
-NGINX_CONFIG_PATH="../nginx/nginx-ssl.conf"
+NGINX_CONFIG_PATH="./nginx/nginx-ssl-simple.conf"
 SSL_CERT_PATH="/etc/letsencrypt"
 DOMAIN_NAME="skillverse.vn"
 
