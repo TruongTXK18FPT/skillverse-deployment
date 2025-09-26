@@ -1,0 +1,443 @@
+name: 🚀 Production Deployment
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      frontend_repo:
+        description: 'Frontend repository (owner/repo)'
+        required: true
+        default: '9m0m/skillverse-prototype'
+      backend_repo:
+        description: 'Backend repository (owner/repo)'  
+        required: true
+        default: '9m0m/SkillVerse_BackEnd'
+      frontend_ref:
+        description: 'Frontend branch/tag/commit'
+        required: false
+        default: 'main'
+      backend_ref:
+        description: 'Backend branch/tag/commit'
+        required: false
+        default: 'main'
+  
+  # Auto-trigger when other repos complete CI
+  workflow_run:
+    workflows: 
+      - "🎯 Frontend CI/CD Pipeline"
+      - "🛠️ Backend CI/CD Pipeline"
+    types:
+      - completed
+    branches:
+      - main
+
+env:
+  DOCKER_BUILDKIT: 1
+  COMPOSE_DOCKER_CLI_BUILD: 1
+
+jobs:
+  # Job 1: Pre-deployment Setup
+  pre-deployment:
+    name: 🔍 Pre-deployment Setup
+    runs-on: ubuntu-latest
+    # Only run if manual trigger OR if CI workflows succeeded
+    if: >
+      github.event_name == 'workflow_dispatch' || 
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    
+    outputs:
+      frontend-repo: ${{ steps.set-vars.outputs.frontend_repo }}
+      backend-repo: ${{ steps.set-vars.outputs.backend_repo }}
+      frontend-ref: ${{ steps.set-vars.outputs.frontend_ref }}
+      backend-ref: ${{ steps.set-vars.outputs.backend_ref }}
+      deploy-id: ${{ steps.deploy-id.outputs.id }}
+    
+    steps:
+    - name: 📥 Checkout Deployment Config
+      uses: actions/checkout@v4
+      
+    - name: ⚙️ Set Variables for Auto/Manual Deployment
+      id: set-vars
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          # Manual trigger - use input values
+          echo "frontend_repo=${{ github.event.inputs.frontend_repo }}" >> $GITHUB_OUTPUT
+          echo "backend_repo=${{ github.event.inputs.backend_repo }}" >> $GITHUB_OUTPUT
+          echo "frontend_ref=${{ github.event.inputs.frontend_ref || 'main' }}" >> $GITHUB_OUTPUT  
+          echo "backend_ref=${{ github.event.inputs.backend_ref || 'main' }}" >> $GITHUB_OUTPUT
+        else
+          # Auto trigger - use default values
+          echo "frontend_repo=9m0m/skillverse-prototype" >> $GITHUB_OUTPUT
+          echo "backend_repo=9m0m/SkillVerse_BackEnd" >> $GITHUB_OUTPUT
+          echo "frontend_ref=main" >> $GITHUB_OUTPUT
+          echo "backend_ref=main" >> $GITHUB_OUTPUT
+        fi
+      
+    - name: 🆔 Generate Deployment ID
+      id: deploy-id
+      run: |
+        DEPLOY_ID="deploy-$(date +%Y%m%d-%H%M%S)-${{ github.run_number }}"
+        echo "id=$DEPLOY_ID" >> $GITHUB_OUTPUT
+        echo "🆔 Deployment ID: $DEPLOY_ID"
+        
+    - name: 📊 Deployment Summary
+      run: |
+        echo "## 🚀 Deployment Configuration" >> $GITHUB_STEP_SUMMARY
+        echo "- **Frontend**: ${{ github.event.inputs.frontend_repo }}@${{ github.event.inputs.frontend_ref || 'main' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Backend**: ${{ github.event.inputs.backend_repo }}@${{ github.event.inputs.backend_ref || 'main' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Deploy ID**: ${{ steps.deploy-id.outputs.id }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Triggered by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+
+  # Job 2: Build Components
+  build-components:
+    name: 🏗️ Build Components
+    runs-on: ubuntu-latest
+    needs: pre-deployment
+    
+    strategy:
+      matrix:
+        component: [frontend, backend]
+        
+    steps:
+    - name: 📥 Checkout Deployment Repository
+      uses: actions/checkout@v4
+      
+    - name: 📥 Checkout Frontend Code
+      if: matrix.component == 'frontend'
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ needs.pre-deployment.outputs.frontend-repo }}
+        ref: ${{ needs.pre-deployment.outputs.frontend-ref }}
+        path: ./skillverse-prototype
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: 📥 Checkout Backend Code  
+      if: matrix.component == 'backend'
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ needs.pre-deployment.outputs.backend-repo }}
+        ref: ${{ needs.pre-deployment.outputs.backend-ref }}
+        path: ./SkillVerse_BackEnd
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: 🔧 Setup Node.js
+      if: matrix.component == 'frontend'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: './skillverse-prototype/package-lock.json'
+        
+    - name: ☕ Setup Java
+      if: matrix.component == 'backend'
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+        cache: 'maven'
+        
+    - name: 🏗️ Build Frontend
+      if: matrix.component == 'frontend'
+      working-directory: ./skillverse-prototype
+      run: |
+        echo "🌐 Building Frontend..."
+        npm ci --silent
+        npm run build
+        echo "✅ Frontend build completed"
+        
+    - name: 🏗️ Build Backend
+      if: matrix.component == 'backend'
+      working-directory: ./SkillVerse_BackEnd
+      run: |
+        echo "☕ Building Backend..."
+        chmod +x mvnw
+        ./mvnw clean package -DskipTests -q
+        echo "✅ Backend build completed"
+        
+    - name: 📦 Archive Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.component }}-build-${{ needs.pre-deployment.outputs.deploy-id }}
+        path: |
+          ${{ matrix.component == 'frontend' && './skillverse-prototype/dist/' || '' }}
+          ${{ matrix.component == 'backend' && './SkillVerse_BackEnd/target/*.jar' || '' }}
+        retention-days: 3
+
+  # Job 3: Deploy to Production VPS
+  deploy-to-vps:
+    name: 🚀 Deploy to Production VPS
+    runs-on: ubuntu-latest
+    needs: [pre-deployment, build-components]
+    environment: production
+    
+    steps:
+    - name: 🚀 Deploy to VPS
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.VPS_HOST }}
+        username: ${{ secrets.VPS_USER }}
+        key: ${{ secrets.VPS_SSH_KEY }}
+        port: ${{ secrets.VPS_PORT }}
+        command_timeout: 20m
+        script: |
+          set -e
+          
+          DEPLOY_ID="${{ needs.pre-deployment.outputs.deploy-id }}"
+          echo "🚀 Starting Production Deployment: $DEPLOY_ID"
+          echo "⏰ $(date)"
+          
+          # Navigate to project directory
+          cd ${{ secrets.VPS_PROJECT_PATH }} || {
+            echo "❌ Failed to navigate to project directory"
+            exit 1
+          }
+          
+          # Create deployment backup
+          echo "💾 Creating deployment backup..."
+          BACKUP_DIR="backups/backup_$DEPLOY_ID"
+          mkdir -p "$BACKUP_DIR"
+          
+          # Backup current state
+          docker compose ps > "$BACKUP_DIR/containers_state.log" 2>/dev/null || true
+          docker images > "$BACKUP_DIR/images_list.log" 2>/dev/null || true
+          docker compose config > "$BACKUP_DIR/docker-compose.yml" 2>/dev/null || true
+          cp -r nginx/ "$BACKUP_DIR/" 2>/dev/null || true
+          echo "✅ Backup created in $BACKUP_DIR"
+          
+          # Clone/update frontend repository
+          echo "🌐 Updating Frontend Code..."
+          if [ -d "skillverse-prototype/.git" ]; then
+            cd skillverse-prototype
+            git fetch origin
+            git checkout ${{ needs.pre-deployment.outputs.frontend-ref }}
+            git reset --hard origin/${{ needs.pre-deployment.outputs.frontend-ref }}
+            cd ..
+          else
+            rm -rf skillverse-prototype
+            git clone -b ${{ needs.pre-deployment.outputs.frontend-ref }} \
+              https://github.com/${{ needs.pre-deployment.outputs.frontend-repo }}.git \
+              skillverse-prototype
+          fi
+          
+          # Clone/update backend repository
+          echo "☕ Updating Backend Code..."
+          if [ -d "SkillVerse_BackEnd/.git" ]; then
+            cd SkillVerse_BackEnd
+            git fetch origin
+            git checkout ${{ needs.pre-deployment.outputs.backend-ref }}
+            git reset --hard origin/${{ needs.pre-deployment.outputs.backend-ref }}
+            cd ..
+          else
+            rm -rf SkillVerse_BackEnd
+            git clone -b ${{ needs.pre-deployment.outputs.backend-ref }} \
+              https://github.com/${{ needs.pre-deployment.outputs.backend-repo }}.git \
+              SkillVerse_BackEnd
+          fi
+          
+          # System resources check
+          echo "💻 System Status:"
+          df -h | head -5
+          free -h
+          docker system df
+          
+          # Cleanup old images
+          echo "🧹 Cleaning up old resources..."
+          docker container prune -f
+          docker image prune -f
+          
+          # Keep only last 3 image versions
+          docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}" | \
+            grep -E "(skillverse-|exe201-)" | \
+            tail -n +4 | \
+            awk '{print $3}' | \
+            xargs -r docker rmi -f 2>/dev/null || true
+          
+          # Stop current services
+          echo "⏹️ Stopping current services..."
+          docker compose down --timeout 30 || true
+          
+          # Start deployment
+          echo "🏁 Starting deployment with build..."
+          docker compose up -d --build --force-recreate
+          
+          # Wait for services
+          echo "⏳ Waiting for services to start..."
+          sleep 60
+          
+          # Health checks with detailed logging
+          echo "🏥 Running comprehensive health checks..."
+          
+          # Check database
+          for i in {1..12}; do
+            if docker compose exec -T db pg_isready -U skillverse_user -d skillverse_db; then
+              echo "✅ Database is ready"
+              break
+            fi
+            echo "⏳ Waiting for database... (attempt $i/12)"
+            sleep 10
+          done
+          
+          # Check backend API with detailed logging
+          for i in {1..20}; do
+            if curl -f -s http://localhost/api/health >/dev/null 2>&1; then
+              echo "✅ Backend API is healthy"
+              API_HEALTH=$(curl -s http://localhost/api/health | jq -r '.status' 2>/dev/null || echo "UP")
+              echo "📊 API Health Status: $API_HEALTH"
+              break
+            fi
+            echo "⏳ Waiting for backend API... (attempt $i/20)"
+            docker compose logs backend --tail=5
+            sleep 15
+          done
+          
+          # Check frontend
+          for i in {1..15}; do
+            if curl -f -s http://localhost/ >/dev/null 2>&1; then
+              echo "✅ Frontend is accessible"
+              break
+            fi
+            echo "⏳ Waiting for frontend... (attempt $i/15)"
+            docker compose logs frontend --tail=5
+            sleep 10
+          done
+          
+          # Test Swagger endpoint
+          if curl -f -s "http://localhost/api/swagger-ui/index.html" >/dev/null 2>&1; then
+            echo "✅ Swagger UI is accessible"
+            SWAGGER_URL="http://${{ secrets.VPS_HOST }}/api/swagger-ui/index.html"
+            echo "📚 Swagger URL: $SWAGGER_URL"
+          else
+            echo "⚠️ Swagger UI accessibility check failed"
+          fi
+          
+          # Final comprehensive status
+          echo "📊 Final Deployment Status:"
+          docker compose ps
+          echo ""
+          echo "🔗 Service URLs:"
+          echo "🌐 Frontend: http://${{ secrets.VPS_HOST }}/"
+          echo "☕ Backend API: http://${{ secrets.VPS_HOST }}/api/"
+          echo "📚 API Docs: http://${{ secrets.VPS_HOST }}/api/swagger-ui/index.html"
+          echo "📋 OpenAPI: http://${{ secrets.VPS_HOST }}/api/v3/api-docs"
+          echo "🔍 Health Check: http://${{ secrets.VPS_HOST }}/api/health"
+          
+          # Clean up old backups (keep last 5)
+          find backups/ -maxdepth 1 -type d -name "backup_*" | \
+            sort -r | tail -n +6 | xargs -r rm -rf
+          
+          echo "✅ Production deployment completed successfully!"
+          echo "🆔 Deployment ID: $DEPLOY_ID"
+          echo "🎉 Deployment finished at $(date)"
+
+  # Job 4: Post-deployment Verification
+  post-deployment:
+    name: ✅ Post-deployment Verification
+    runs-on: ubuntu-latest
+    needs: [pre-deployment, deploy-to-vps]
+    if: always() && needs.deploy-to-vps.result == 'success'
+    
+    steps:
+    - name: 🧪 External Health Checks
+      run: |
+        echo "🔍 Running external verification..."
+        
+        # Wait for services to fully stabilize
+        sleep 45
+        
+        # Test main application
+        if curl -f -s "${{ secrets.VPS_HOST }}" >/dev/null 2>&1; then
+          echo "✅ Application is accessible externally"
+        else
+          echo "❌ Application is not accessible externally"
+          exit 1
+        fi
+        
+        # Test API health endpoint
+        if curl -f -s "${{ secrets.VPS_HOST }}/api/health" >/dev/null 2>&1; then
+          echo "✅ API health endpoint is accessible"
+          HEALTH_STATUS=$(curl -s "${{ secrets.VPS_HOST }}/api/health" | jq -r '.status' 2>/dev/null || echo "UNKNOWN")
+          echo "📊 Health Status: $HEALTH_STATUS"
+        else
+          echo "❌ API health endpoint is not accessible"
+          exit 1
+        fi
+        
+        # Test Swagger documentation
+        if curl -f -s "${{ secrets.VPS_HOST }}/api/swagger-ui/index.html" >/dev/null 2>&1; then
+          echo "✅ Swagger documentation is accessible"
+        else
+          echo "⚠️ Swagger documentation may not be accessible"
+        fi
+        
+        # Test OpenAPI specification
+        if curl -f -s "${{ secrets.VPS_HOST }}/api/v3/api-docs" >/dev/null 2>&1; then
+          echo "✅ OpenAPI specification is accessible"
+        else
+          echo "⚠️ OpenAPI specification may not be accessible"
+        fi
+        
+    - name: 📊 Final Deployment Summary
+      run: |
+        echo "## 🎉 Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+        echo "- **Status**: ✅ Successfully Deployed" >> $GITHUB_STEP_SUMMARY
+        echo "- **Deploy ID**: ${{ needs.pre-deployment.outputs.deploy-id }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Frontend**: ${{ needs.pre-deployment.outputs.frontend-repo }}@${{ needs.pre-deployment.outputs.frontend-ref }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Backend**: ${{ needs.pre-deployment.outputs.backend-repo }}@${{ needs.pre-deployment.outputs.backend-ref }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Deployed at**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+        echo "- **Deployed by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔗 Live URLs" >> $GITHUB_STEP_SUMMARY
+        echo "- [🌐 Application](${{ secrets.VPS_HOST }})" >> $GITHUB_STEP_SUMMARY
+        echo "- [📚 API Documentation](${{ secrets.VPS_HOST }}/api/swagger-ui/index.html)" >> $GITHUB_STEP_SUMMARY
+        echo "- [📋 OpenAPI Spec](${{ secrets.VPS_HOST }}/api/v3/api-docs)" >> $GITHUB_STEP_SUMMARY
+        echo "- [🔍 Health Check](${{ secrets.VPS_HOST }}/api/health)" >> $GITHUB_STEP_SUMMARY
+
+  # Job 5: Rollback on Failure
+  rollback:
+    name: 🔄 Emergency Rollback
+    runs-on: ubuntu-latest
+    needs: [pre-deployment, deploy-to-vps, post-deployment]
+    if: always() && (needs.deploy-to-vps.result == 'failure' || needs.post-deployment.result == 'failure')
+    
+    steps:
+    - name: 🔄 Execute Rollback
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.VPS_HOST }}
+        username: ${{ secrets.VPS_USER }}
+        key: ${{ secrets.VPS_SSH_KEY }}
+        port: ${{ secrets.VPS_PORT }}
+        script: |
+          echo "🔄 Starting emergency rollback..."
+          cd ${{ secrets.VPS_PROJECT_PATH }}
+          
+          DEPLOY_ID="${{ needs.pre-deployment.outputs.deploy-id }}"
+          BACKUP_DIR="backups/backup_$DEPLOY_ID"
+          
+          if [ -d "$BACKUP_DIR" ]; then
+            echo "📦 Rolling back using backup: $BACKUP_DIR"
+            
+            # Stop current services
+            docker compose down --timeout 10 || true
+            
+            # Restore nginx config
+            if [ -d "$BACKUP_DIR/nginx" ]; then
+              cp -r "$BACKUP_DIR/nginx/" ./
+            fi
+            
+            # Restore docker-compose.yml
+            if [ -f "$BACKUP_DIR/docker-compose.yml" ]; then
+              cp "$BACKUP_DIR/docker-compose.yml" ./docker-compose.yml
+            fi
+            
+            # Start services with previous configuration
+            docker compose up -d
+            
+            echo "✅ Rollback completed"
+            echo "📊 Service status after rollback:"
+            docker compose ps
+          else
+            echo "❌ No backup found for rollback, manual intervention required"
+            echo "💡 Available backups:"
+            ls -la backups/ || true
+          fi

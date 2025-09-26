@@ -371,6 +371,7 @@ docker compose up -d
 echo "⏳ Waiting for services to be ready..."
 sleep 30
 
+
 # Check health
 echo "🏥 Checking service health..."
 docker compose ps
